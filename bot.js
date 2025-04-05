@@ -1,8 +1,10 @@
 // bot.js
 require('dotenv').config();
+const fs = require('fs');
 const { Telegraf, Markup } = require('telegraf');
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
+// Определяем роли пользователей
 const roles = {
   OWNER: 'owner',
   ADMIN: 'admin',
@@ -11,20 +13,45 @@ const roles = {
 };
 
 const OWNER_ID = parseInt(process.env.OWNER_ID);
-const users = new Map();
-const products = [];
-const contacts = [];
-const feedbacks = [];
+const users = new Map(); // Хранит пользователей и их роли
+let products = []; // Список товаров
+let contacts = []; // Список контактов
+const feedbacks = []; // Список обратной связи
 
-const userStates = new Map();
-let tempData = {};
+const userStates = new Map(); // Хранит состояние взаимодействия каждого пользователя
+let tempData = {}; // Временное хранилище данных при добавлении товаров/контактов
 
+// Загрузка данных из файлов
+function loadData() {
+  if (fs.existsSync('products.json')) {
+    products = JSON.parse(fs.readFileSync('products.json'));
+  }
+  if (fs.existsSync('contacts.json')) {
+    contacts = JSON.parse(fs.readFileSync('contacts.json'));
+  }
+  if (fs.existsSync('users.json')) {
+    const userList = JSON.parse(fs.readFileSync('users.json'));
+    userList.forEach((u) => users.set(u.id, u));
+  }
+}
+
+// Сохраняем данные в файлы
+function saveData() {
+  fs.writeFileSync('products.json', JSON.stringify(products, null, 2));
+  fs.writeFileSync('contacts.json', JSON.stringify(contacts, null, 2));
+  fs.writeFileSync('users.json', JSON.stringify(Array.from(users.values()), null, 2));
+}
+
+loadData();
+
+// Middleware для установки роли и состояния
 bot.use(async (ctx, next) => {
   if (!ctx.from) return;
   const { id, username } = ctx.from;
   if (!users.has(id)) {
     const role = id === OWNER_ID ? roles.OWNER : roles.USER;
     users.set(id, { id, username, role });
+    saveData();
   }
   ctx.user = users.get(id);
   ctx.state = userStates.get(id) || 'default';
@@ -34,6 +61,7 @@ bot.use(async (ctx, next) => {
 const isAdmin = (ctx) => [roles.ADMIN, roles.MODERATOR, roles.OWNER].includes(ctx.user.role);
 const isOwner = (ctx) => ctx.user.role === roles.OWNER;
 
+// Главное меню для пользователей
 function mainMenu(ctx) {
   userStates.set(ctx.from.id, 'default');
   return ctx.reply('Выберите действие:', Markup.keyboard([
@@ -43,20 +71,24 @@ function mainMenu(ctx) {
   ]).resize());
 }
 
+// Команда /start
 bot.start((ctx) => mainMenu(ctx));
 
+// Показать список товаров
 bot.hears('📦 Товары', async (ctx) => {
   userStates.set(ctx.from.id, 'default');
   if (products.length === 0) return ctx.reply('Товары пока не добавлены.');
   products.forEach((p, i) => ctx.reply(`${i + 1}. ${p.name} — ${p.description}`));
 });
 
+// Показать список контактов
 bot.hears('📞 Контакты', async (ctx) => {
   userStates.set(ctx.from.id, 'default');
   if (contacts.length === 0) return ctx.reply('Контакты пока не добавлены.');
   contacts.forEach((c, i) => ctx.reply(`${i + 1}. ${c.name}: ${c.value}`));
 });
 
+// Раздел обратной связи
 bot.hears('✉️ Обратная связь', (ctx) => {
   const existing = feedbacks.find(f => f.from === ctx.from.id && !f.answered);
   if (existing) {
@@ -66,9 +98,68 @@ bot.hears('✉️ Обратная связь', (ctx) => {
   ctx.reply('Отправьте ваше сообщение (текст, фото, голосовое, видео или файл):');
 });
 
+// Админ панель
+bot.hears('🛠 Админ панель', (ctx) => {
+  if (!isAdmin(ctx)) return;
+  userStates.set(ctx.from.id, 'admin');
+  ctx.reply('Админ панель:', Markup.inlineKeyboard([
+    [Markup.button.callback('➕ Добавить товар', 'add_product')],
+    [Markup.button.callback('➖ Удалить товар', 'delete_product')],
+    [Markup.button.callback('➕ Добавить контакт', 'add_contact')],
+    [Markup.button.callback('➖ Удалить контакт', 'delete_contact')],
+    ...(isOwner(ctx) ? [[Markup.button.callback('👤 Управление модераторами', 'manage_mods')]] : [])
+  ]));
+});
+
+// Управление модераторами (только для владельца)
+bot.action('manage_mods', (ctx) => {
+  const mods = Array.from(users.values()).filter(u => u.role === roles.MODERATOR);
+  let text = '👥 Список модераторов:\n';
+  mods.forEach((m, i) => {
+    text += `${i + 1}. ${m.username || m.id}\n`;
+  });
+  ctx.reply(text, Markup.inlineKeyboard([
+    [Markup.button.callback('➕ Назначить модератора', 'add_mod')],
+    [Markup.button.callback('➖ Удалить модератора', 'remove_mod')]
+  ]));
+});
+
+bot.action('add_mod', (ctx) => {
+  userStates.set(ctx.from.id, 'add_mod');
+  ctx.reply('Введите ID пользователя для назначения модератором:');
+});
+
+bot.action('remove_mod', (ctx) => {
+  userStates.set(ctx.from.id, 'remove_mod');
+  ctx.reply('Введите ID модератора для удаления:');
+});
+
+// Обработка кнопок из админки
+bot.action('add_product', async (ctx) => {
+  userStates.set(ctx.from.id, 'add_product_name');
+  ctx.reply('Введите название товара:');
+});
+
+bot.action('delete_product', async (ctx) => {
+  userStates.set(ctx.from.id, 'delete_product_index');
+  ctx.reply('Введите номер товара для удаления:');
+});
+
+bot.action('add_contact', async (ctx) => {
+  userStates.set(ctx.from.id, 'add_contact');
+  ctx.reply('Введите имя контакта:');
+});
+
+bot.action('delete_contact', async (ctx) => {
+  userStates.set(ctx.from.id, 'delete_contact_index');
+  ctx.reply('Введите номер контакта для удаления:');
+});
+
+// Обработка всех сообщений
 bot.on('message', async (ctx, next) => {
   const state = userStates.get(ctx.from.id);
 
+  // Обработка обратной связи
   if (state === 'feedback') {
     const feedbackId = feedbacks.length;
     feedbacks.push({ from: ctx.from.id, msg: ctx.message, answered: false, date: new Date() });
@@ -91,6 +182,7 @@ bot.on('message', async (ctx, next) => {
 
   if (ctx.state === 'feedback') return;
 
+  // Добавление товара
   if (state === 'add_product_name') {
     tempData[ctx.from.id] = { name: ctx.message.text };
     userStates.set(ctx.from.id, 'add_product_desc');
@@ -98,15 +190,18 @@ bot.on('message', async (ctx, next) => {
   } else if (state === 'add_product_desc') {
     const { name } = tempData[ctx.from.id];
     products.push({ name, description: ctx.message.text });
+    saveData();
     delete tempData[ctx.from.id];
     userStates.set(ctx.from.id, 'default');
     return ctx.reply('Товар добавлен.');
   }
 
+  // Удаление товара
   if (state === 'delete_product_index') {
     const index = parseInt(ctx.message.text) - 1;
     if (!isNaN(index) && products[index]) {
       const removed = products.splice(index, 1)[0];
+      saveData();
       userStates.set(ctx.from.id, 'default');
       return ctx.reply(`Товар "${removed.name}" удалён.`);
     } else {
@@ -114,142 +209,65 @@ bot.on('message', async (ctx, next) => {
     }
   }
 
-  if (state === 'add_contact_name') {
+  // Добавление контакта
+  if (state === 'add_contact') {
     tempData[ctx.from.id] = { name: ctx.message.text };
     userStates.set(ctx.from.id, 'add_contact_value');
     return ctx.reply('Введите значение контакта:');
-  } else if (state === 'add_contact_value') {
+  }
+
+  if (state === 'add_contact_value') {
     const { name } = tempData[ctx.from.id];
     contacts.push({ name, value: ctx.message.text });
+    saveData();
     delete tempData[ctx.from.id];
     userStates.set(ctx.from.id, 'default');
     return ctx.reply('Контакт добавлен.');
   }
 
-  if (state === 'edit_contact_select') {
+  // Удаление контакта
+  if (state === 'delete_contact_index') {
     const index = parseInt(ctx.message.text) - 1;
-    if (contacts[index]) {
-      tempData[ctx.from.id] = { index };
-      userStates.set(ctx.from.id, 'edit_contact_field');
-      return ctx.reply('Что вы хотите изменить?', Markup.keyboard([
-        ['Название контакта', 'Значение контакта']
-      ]).oneTime().resize());
+    if (!isNaN(index) && contacts[index]) {
+      const removed = contacts.splice(index, 1)[0];
+      saveData();
+      userStates.set(ctx.from.id, 'default');
+      return ctx.reply(`Контакт "${removed.name}" удалён.`);
     } else {
-      return ctx.reply('Контакт не найден. Введите корректный номер.');
+      return ctx.reply('Неверный номер контакта.');
     }
-  } else if (state === 'edit_contact_field') {
-    const field = ctx.message.text;
-    if (['Название контакта', 'Значение контакта'].includes(field)) {
-      tempData[ctx.from.id].field = field === 'Название контакта' ? 'name' : 'value';
-      userStates.set(ctx.from.id, 'edit_contact_value');
-      return ctx.reply('Введите новое значение:');
-    } else {
-      return ctx.reply('Выберите из предложенных вариантов.');
-    }
-  } else if (state === 'edit_contact_value') {
-    const { index, field } = tempData[ctx.from.id];
-    contacts[index][field] = ctx.message.text;
-    delete tempData[ctx.from.id];
-    userStates.set(ctx.from.id, 'default');
-    return ctx.reply('Контакт успешно изменён.');
   }
 
-  if (state.startsWith('replying_')) {
-    const feedbackId = parseInt(state.split('_')[1]);
-    const feedback = feedbacks[feedbackId];
-    if (feedback) {
-      await bot.telegram.sendMessage(feedback.from, `Ответ от администрации:\n${ctx.message.text}`);
-      feedback.answered = true;
-      ctx.reply('Ответ отправлен.');
-    }
-    userStates.set(ctx.from.id, 'default');
-    return;
-  }
-
+  // Назначение модератора
   if (state === 'add_mod') {
-    const modId = parseInt(ctx.message.text);
-    const mod = users.get(modId);
-    if (mod) {
-      mod.role = roles.MODERATOR;
-      ctx.reply('Модератор добавлен.');
-    } else {
-      ctx.reply('Пользователь не найден.');
+    const id = parseInt(ctx.message.text);
+    if (users.has(id)) {
+      users.get(id).role = roles.MODERATOR;
+      saveData();
+      userStates.set(ctx.from.id, 'default');
+      return ctx.reply('Модератор назначен.');
     }
-    userStates.set(ctx.from.id, 'default');
-    return;
+    return ctx.reply('Пользователь не найден.');
+  }
+
+  // Удаление модератора
+  if (state === 'remove_mod') {
+    const id = parseInt(ctx.message.text);
+    if (users.has(id) && users.get(id).role === roles.MODERATOR) {
+      users.get(id).role = roles.USER;
+      saveData();
+      userStates.set(ctx.from.id, 'default');
+      return ctx.reply('Модератор удалён.');
+    }
+    return ctx.reply('Модератор не найден.');
   }
 
   next();
 });
 
-bot.action(/reply_(\d+)/, async (ctx) => {
-  const id = parseInt(ctx.match[1]);
-  const feedback = feedbacks[id];
-  if (!feedback) return ctx.reply('Сообщение не найдено.');
-  userStates.set(ctx.from.id, `replying_${id}`);
-  ctx.reply('Введите ответ пользователю:');
-});
-
-bot.hears('🛠 Админ панель', async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply('Нет доступа.');
-  userStates.set(ctx.from.id, 'admin_panel');
-  if (ctx.message?.message_id) {
-    try {
-      await ctx.deleteMessage(ctx.message.message_id);
-    } catch (err) {
-      console.error('Ошибка при удалении сообщения:', err.message);
-    }
-  }
-  ctx.reply('Админ панель', Markup.inlineKeyboard([
-    [Markup.button.callback('📨 Сообщения', 'admin_messages')],
-    [Markup.button.callback('📦 Управление товарами', 'admin_products')],
-    [Markup.button.callback('📞 Управление контактами', 'admin_contacts')],
-    ...(isOwner(ctx) ? [[Markup.button.callback('👤 Модераторы', 'admin_moderators')]] : [])
-  ]));
-});
-
-bot.action('admin_messages', async (ctx) => {
-  const pending = feedbacks.filter(f => !f.answered);
-  const all = feedbacks.length;
-  await ctx.editMessageText(`Всего сообщений: ${all}\nНеотвеченных: ${pending.length}`, Markup.inlineKeyboard([
-    [Markup.button.callback('🔙 Назад', 'back_to_admin')]
-  ]));
-  pending.forEach((f) => {
-    const username = users.get(f.from)?.username || f.from;
-    const time = f.date.toLocaleString();
-    bot.telegram.sendMessage(ctx.from.id, `📨 Сообщение от @${username}\n📅 Дата: ${time}`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback('Ответить', `reply_${feedbacks.indexOf(f)}`)]
-      ]));
-    bot.telegram.copyMessage(ctx.from.id, f.from, f.msg.message_id);
-  });
-});
-
-bot.action('admin_contacts', async (ctx) => {
-  await ctx.editMessageText('Контакты:', Markup.inlineKeyboard([
-    [Markup.button.callback('➕ Добавить', 'add_contact')],
-    [Markup.button.callback('✏️ Редактировать контакт', 'edit_contact')],
-    [Markup.button.callback('🔙 Назад', 'back_to_admin')]
-  ]));
-});
-
-bot.action('edit_contact', async (ctx) => {
-  userStates.set(ctx.from.id, 'edit_contact_select');
-  let msg = 'Выберите номер контакта для изменения:\n';
-  contacts.forEach((c, i) => msg += `${i + 1}. ${c.name}: ${c.value}\n`);
-  ctx.reply(msg);
-});
-
-bot.action('back_to_admin', async (ctx) => {
-  await ctx.editMessageText('Админ панель', Markup.inlineKeyboard([
-    [Markup.button.callback('📨 Сообщения', 'admin_messages')],
-    [Markup.button.callback('📦 Управление товарами', 'admin_products')],
-    [Markup.button.callback('📞 Управление контактами', 'admin_contacts')],
-    ...(isOwner(ctx) ? [[Markup.button.callback('👤 Модераторы', 'admin_moderators')]] : [])
-  ]));
-});
-
+// Запуск бота
 bot.launch();
 
+// Обработка остановки процесса
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
